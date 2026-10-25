@@ -226,7 +226,8 @@ impl<'a> Visitor<'a> for Mysql<'a> {
     }
 
     fn visit_insert(&mut self, insert: Insert<'a>) -> visitor::Result {
-        match insert.on_conflict {
+        let on_conflict = insert.on_conflict;
+        match &on_conflict {
             Some(OnConflict::DoNothing) => self.write("INSERT IGNORE ")?,
             _ => self.write("INSERT ")?,
         };
@@ -310,6 +311,11 @@ impl<'a> Visitor<'a> for Mysql<'a> {
             expr => self.surround_with("(", ")", |ref mut s| s.visit_expression(expr))?,
         }
 
+        if let Some(OnConflict::Update(update, _)) = on_conflict {
+            self.write(" ON DUPLICATE KEY ")?;
+            self.visit_upsert(update)?;
+        }
+
         if let Some(comment) = insert.comment {
             self.write(" ")?;
             self.visit_comment(comment)?;
@@ -317,8 +323,15 @@ impl<'a> Visitor<'a> for Mysql<'a> {
         Ok(())
     }
 
-    fn visit_upsert(&mut self, _update: crate::ast::Update<'a>) -> visitor::Result {
-        unimplemented!("Upsert not supported for the underlying database.")
+    fn visit_upsert(&mut self, update: crate::ast::Update<'a>) -> visitor::Result {
+        if update.conditions.is_some() {
+            return Err(Error::builder(ErrorKind::QueryInvalidInput(
+                "MySQL does not support a WHERE clause on ON DUPLICATE KEY UPDATE".into(),
+            ))
+            .build());
+        }
+        self.write("UPDATE ")?;
+        self.visit_update_set(update)
     }
 
     /// MySql will error if a `Update` or `Delete` query has a subselect
@@ -743,6 +756,33 @@ fn get_target_table<'a>(query: &Query<'a>) -> Option<Table<'a>> {
 mod tests {
     use crate::ast::*;
     use crate::visitor::*;
+
+    #[test]
+    fn test_insert_on_duplicate_key_update() {
+        let insert: Insert = Insert::single_into("counters")
+            .value("id", "counter")
+            .value("clicks", 1)
+            .into();
+        let update = Update::table("counters").set("clicks", 2);
+        let query = insert.on_conflict(OnConflict::Update(update, vec!["id".into()]));
+
+        let (sql, params) = Mysql::build(query).unwrap();
+
+        assert_eq!(
+            "INSERT INTO `counters` (`id`,`clicks`) VALUES (?,?) ON DUPLICATE KEY UPDATE `clicks` = ?",
+            sql
+        );
+        assert_eq!(vec![Value::text("counter"), Value::int32(1), Value::int32(2)], params);
+    }
+
+    #[test]
+    fn test_conditional_upsert_is_rejected() {
+        let insert: Insert = Insert::single_into("counters").value("id", 1).into();
+        let update = Update::table("counters").set("clicks", 2).so_that("id".equals(1));
+        let query = insert.on_conflict(OnConflict::Update(update, vec!["id".into()]));
+
+        assert!(Mysql::build(query).is_err());
+    }
 
     fn expected_values<'a, T>(sql: &'static str, params: Vec<T>) -> (String, Vec<Value<'a>>)
     where

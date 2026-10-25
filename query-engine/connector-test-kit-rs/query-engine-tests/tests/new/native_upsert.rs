@@ -1,6 +1,8 @@
 use query_engine_tests::*;
 
-#[test_suite(capabilities(NativeUpsert))]
+// These cases rely on ON CONFLICT choosing a particular unique constraint.
+// MySQL only uses native upsert for models with a single, unchanged unique key.
+#[test_suite(capabilities(NativeUpsert), exclude(MySql))]
 mod native_upsert {
 
     #[connector_test(schema(user))]

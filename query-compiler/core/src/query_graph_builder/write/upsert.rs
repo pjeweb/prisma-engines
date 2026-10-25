@@ -5,6 +5,8 @@ use crate::{
     query_ast::*,
     query_graph::{Flow, QueryGraph, QueryGraphDependency},
 };
+use itertools::Itertools;
+use psl::datamodel_connector::ConnectorCapability;
 use query_structure::Model;
 use schema::QuerySchema;
 
@@ -74,6 +76,14 @@ pub(crate) fn upsert_record(
     let read_query = read::find_unique(field.clone(), model.clone(), query_schema)?;
 
     if can_use_native_upsert && let ReadQuery::RecordQuery(read) = read_query {
+        if !query_schema
+            .capabilities()
+            .contains(ConnectorCapability::InsertReturning)
+        {
+            // Keep the inserted or updated row locked until the read after the write.
+            graph.flag_transactional();
+        }
+
         let mut create_write_args = WriteArgsParser::from(&model, create_argument)?.args;
         let mut update_write_args = WriteArgsParser::from(&model, update_argument)?.args;
 
@@ -226,7 +236,48 @@ fn can_use_connector_native_upsert<'a>(
         && !empty_update
         && !has_nested_selects
         && where_values_same_as_create
-        && !query_schema.relation_mode().is_prisma()
+        && if query_schema
+            .capabilities()
+            .contains(ConnectorCapability::InsertReturning)
+        {
+            !query_schema.relation_mode().is_prisma()
+        } else {
+            can_use_native_upsert_without_returning(model, where_field, update_argument)
+        }
+}
+
+fn can_use_native_upsert_without_returning(
+    model: &Model,
+    where_field: &ParsedInputMap<'_>,
+    update_argument: &ParsedInputMap<'_>,
+) -> bool {
+    let Ok(key) = model.walker().unique_criterias().exactly_one() else {
+        return false;
+    };
+
+    let has_prefix_key = model
+        .walker()
+        .primary_key()
+        .is_some_and(|key| key.scalar_field_attributes().any(|field| field.length().is_some()))
+        || model
+            .walker()
+            .indexes()
+            .filter(|index| index.is_unique())
+            .any(|index| index.scalar_field_attributes().any(|field| field.length().is_some()));
+
+    // MySQL cannot choose which unique constraint triggers the update. The same
+    // unchanged key must also identify the row for the read after the write.
+    // Prefix keys can conflict even when the full lookup value is different.
+    where_field.len() == 1
+        && key.is_strict_criteria()
+        && !has_prefix_key
+        && model.walker().relation_fields().next().is_none()
+        && model.walker().shard_key().is_none()
+        && key.fields().all(|field| {
+            field
+                .as_scalar_field()
+                .is_some_and(|field| !update_argument.contains_key(field.name()) && !field.is_updated_at())
+        })
 }
 
 fn is_unique_field(field_name: &str, model: &Model) -> bool {

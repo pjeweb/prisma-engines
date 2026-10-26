@@ -226,8 +226,7 @@ impl<'a> Visitor<'a> for Mysql<'a> {
     }
 
     fn visit_insert(&mut self, insert: Insert<'a>) -> visitor::Result {
-        let on_conflict = insert.on_conflict;
-        match &on_conflict {
+        match insert.on_conflict {
             Some(OnConflict::DoNothing) => self.write("INSERT IGNORE ")?,
             _ => self.write("INSERT ")?,
         };
@@ -311,7 +310,7 @@ impl<'a> Visitor<'a> for Mysql<'a> {
             expr => self.surround_with("(", ")", |ref mut s| s.visit_expression(expr))?,
         }
 
-        if let Some(OnConflict::Update(update, _)) = on_conflict {
+        if let Some(OnConflict::Update(update, _)) = insert.on_conflict {
             self.write(" ON DUPLICATE KEY ")?;
             self.visit_upsert(update)?;
         }
@@ -757,6 +756,23 @@ mod tests {
     use crate::ast::*;
     use crate::visitor::*;
 
+    fn expected_values<'a, T>(sql: &'static str, params: Vec<T>) -> (String, Vec<Value<'a>>)
+    where
+        T: Into<Value<'a>>,
+    {
+        (String::from(sql), params.into_iter().map(|p| p.into()).collect())
+    }
+
+    fn default_params(mut additional: Vec<Value<'_>>) -> Vec<Value<'_>> {
+        let mut result = Vec::new();
+
+        for param in additional.drain(0..) {
+            result.push(param)
+        }
+
+        result
+    }
+
     #[test]
     fn test_insert_on_duplicate_key_update() {
         let insert: Insert = Insert::single_into("counters")
@@ -782,23 +798,6 @@ mod tests {
         let query = insert.on_conflict(OnConflict::Update(update, vec!["id".into()]));
 
         assert!(Mysql::build(query).is_err());
-    }
-
-    fn expected_values<'a, T>(sql: &'static str, params: Vec<T>) -> (String, Vec<Value<'a>>)
-    where
-        T: Into<Value<'a>>,
-    {
-        (String::from(sql), params.into_iter().map(|p| p.into()).collect())
-    }
-
-    fn default_params(mut additional: Vec<Value<'_>>) -> Vec<Value<'_>> {
-        let mut result = Vec::new();
-
-        for param in additional.drain(0..) {
-            result.push(param)
-        }
-
-        result
     }
 
     #[test]

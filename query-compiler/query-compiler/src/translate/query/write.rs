@@ -265,27 +265,10 @@ pub(crate) fn translate_write_query(query: WriteQuery, builder: &dyn QueryBuilde
                     &upsert.unique_constraints(),
                 )
                 .map_err(TranslateError::QueryBuildFailure)?;
-            if upsert
-                .model()
-                .dm
-                .schema
-                .connector
-                .capabilities()
-                .contains(psl::datamodel_connector::ConnectorCapability::InsertReturning)
-            {
+            if upsert.selected_fields().is_some() {
                 Expression::Unique(Box::new(Expression::Query(query)))
             } else {
-                let read = build_query_from_record_filter(
-                    builder,
-                    upsert.model(),
-                    upsert.record_filter().clone(),
-                    upsert.selected_fields(),
-                    Some(Take::Some(1)),
-                )?;
-                Expression::Seq(vec![
-                    Expression::Execute(query),
-                    Expression::Unique(Box::new(Expression::Query(read))),
-                ])
+                Expression::Execute(query)
             }
         }
 
